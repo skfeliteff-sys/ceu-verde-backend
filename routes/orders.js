@@ -2,14 +2,22 @@
 const express = require('express');
 const router = express.Router();
 const { saveOrder, getOrder } = require('../db');
-const { createPixPayment } = require('../services/mercadopago');
+const { createPixPayment, createCardPayment, mensagemRecusa } = require('../services/mercadopago');
 const { quoteShipping, resumoPedido } = require('../services/shipping');
 const { emailPedidoCriado, emailRastreamento } = require('../services/email');
 
-// Cria um pedido novo, recalcula o frete no servidor e gera a cobranca PIX.
+// Chave PÚBLICA do Mercado Pago (segura pra ficar no navegador) usada pelo Card Payment Brick.
+router.get('/payment/config', (req, res) => {
+  const publicKey = process.env.MERCADOPAGO_PUBLIC_KEY;
+  if (!publicKey) return res.status(503).json({ erro: 'Pagamento com cartão ainda não foi ativado no servidor.' });
+  res.json({ publicKey });
+});
+
+// Cria um pedido novo, recalcula o frete no servidor e gera a cobranca:
+// PIX (padrao) ou CARTAO (quando o corpo traz `cartao` com o token do Card Payment Brick).
 router.post('/orders', async (req, res) => {
   try {
-    const { itens, cliente, endereco, frete } = req.body;
+    const { itens, cliente, endereco, frete, cartao } = req.body;
 
     if (!itens?.length || !cliente?.email || !endereco?.cep) {
       return res.status(400).json({ erro: 'Pedido incompleto (itens, cliente ou endereco faltando)' });
@@ -29,12 +37,19 @@ router.post('/orders', async (req, res) => {
     const valor = Number((subtotal + freteReal.price).toFixed(2));
     const orderId = 'CV-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
 
-    const pix = await createPixPayment({
-      orderId,
-      valor,
-      descricao: `Pedido Ceu Verde Amazonia #${orderId}`,
-      pagador: cliente
-    });
+    const descricao = `Pedido Ceu Verde Amazonia #${orderId}`;
+    let pix = null;
+    let card = null;
+    if (cartao) {
+      if (!cartao.token || !cartao.paymentMethodId) {
+        return res.status(400).json({ erro: 'Dados do cartao incompletos' });
+      }
+      card = await createCardPayment({ orderId, valor, descricao, pagador: cliente, cartao, itens });
+    } else {
+      pix = await createPixPayment({ orderId, valor, descricao, pagador: cliente });
+    }
+    const pagto = card || pix;
+    const recusado = !!card && ['rejected', 'cancelled'].includes(card.status);
 
     const order = {
       id: orderId,
@@ -44,14 +59,27 @@ router.post('/orders', async (req, res) => {
       subtotal: Number(subtotal.toFixed(2)),
       frete: freteReal,
       valor,
-      mpPaymentId: pix.paymentId,
-      pagamento: 'pendente',
+      mpPaymentId: pagto.paymentId,
+      // 'pago' so e marcado pelo webhook (que tambem emite NF-e e aciona dropship)
+      pagamento: recusado ? 'recusado' : 'pendente',
       notaFiscal: null,
       rastreamento: null,
       notificacoes: {},
       criadoEm: new Date().toISOString()
     };
     await saveOrder(order);
+
+    if (card) {
+      // Cartao: o resultado ja vem na hora. Aprovado -> o webhook confirma (e-mail, NF-e, dropship).
+      const mensagem = recusado ? mensagemRecusa(card.statusDetail) : undefined;
+      if (['pending', 'in_process'].includes(card.status)) {
+        try {
+          const sent = await emailPedidoCriado(order);
+          if (!sent?.skipped) { order.notificacoes.pedidoCriado = new Date().toISOString(); await saveOrder(order); }
+        } catch (emailErr) { console.error('Falha no e-mail de pedido criado:', emailErr.message); }
+      }
+      return res.json({ orderId, status: card.status, statusDetail: card.statusDetail, mensagem, frete: freteReal, valor });
+    }
 
     // E-mail de pedido criado. Falha no provedor não impede a compra.
     try {
@@ -75,6 +103,9 @@ router.post('/orders', async (req, res) => {
           ? 'Frete real ainda nao foi ativado no servidor.'
           : 'Nao foi possivel confirmar a cotacao de frete. Calcule novamente.'
       });
+    }
+    if (err.mpStatus && err.mpStatus >= 400 && err.mpStatus < 500) {
+      return res.status(422).json({ erro: 'Nao foi possivel processar o cartao. Confira os dados e tente novamente.' });
     }
     res.status(500).json({ erro: 'Falha ao criar pedido/pagamento' });
   }

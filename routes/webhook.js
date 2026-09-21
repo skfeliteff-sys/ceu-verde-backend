@@ -21,7 +21,12 @@ router.post('/webhook/mercadopago', async (req, res) => {
     const payment = await getPayment(paymentId);
     if (payment.status !== 'approved') return; // ignora pending/rejected/etc
 
-    const order = (await getOrderByPaymentId(paymentId)) || (await getOrder(payment.external_reference));
+    // Cartao aprova quase instantaneamente: o webhook pode chegar antes do pedido ser gravado. Tenta por ~10s.
+    let order = null;
+    for (let tentativa = 0; tentativa < 6 && !order; tentativa++) {
+      order = (await getOrderByPaymentId(paymentId)) || (await getOrder(payment.external_reference));
+      if (!order) await new Promise(r => setTimeout(r, 2000));
+    }
     if (!order) {
       console.error('Pedido não encontrado pro pagamento', paymentId);
       return;
