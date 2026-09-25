@@ -14,7 +14,7 @@ function esc(v=''){
 
 function baseEmail({ title, intro, content, order }){
   const store = process.env.STORE_NAME || 'Céu Verde Amazônia';
-  const support = process.env.SUPPORT_EMAIL || '';
+  const support = process.env.SUPPORT_EMAIL || 'ceuverdeamazonia@gmail.com';
   const footer = support ? `Dúvidas? Fale com a gente em ${esc(support)}.` : 'Obrigado por comprar com a gente.';
   return `<!doctype html><html><body style="margin:0;background:#f4f6f2;font-family:Arial,sans-serif;color:#203126">
   <div style="max-width:620px;margin:0 auto;padding:28px 14px">
@@ -29,7 +29,7 @@ function baseEmail({ title, intro, content, order }){
   </div></body></html>`;
 }
 
-async function sendEmail({ to, subject, html }){
+async function sendEmail({ to, subject, html, notifyStore=false }){
   const apiKey = process.env.RESEND_API_KEY;
   const from = process.env.EMAIL_FROM;
   if (!apiKey || !from) {
@@ -41,7 +41,7 @@ async function sendEmail({ to, subject, html }){
   const res = await fetch(RESEND_API_URL, {
     method:'POST',
     headers:{ 'Authorization':`Bearer ${apiKey}`, 'Content-Type':'application/json' },
-    body: JSON.stringify({ from, to:[to], subject, html })
+    body: JSON.stringify({ from, to:[to], subject, html, ...(notifyStore && to.toLowerCase() !== 'ceuverdeamazonia@gmail.com' ? { bcc:['ceuverdeamazonia@gmail.com'] } : {}) })
   });
   const data = await res.json().catch(()=>({}));
   if (!res.ok) {
@@ -67,7 +67,7 @@ async function emailPedidoCriado(order){
     order,
     content:`${itemsHtml(order)}<p style="margin-top:18px"><b>Pagamento:</b> aguardando confirmação.</p>`
   });
-  return sendEmail({ to:order.cliente?.email, subject:`Pedido ${order.id} recebido — Céu Verde`, html });
+  return sendEmail({ to:order.cliente?.email, subject:`Pedido ${order.id} recebido — Céu Verde`, html, notifyStore:true });
 }
 
 async function emailPagamentoConfirmado(order){
@@ -77,7 +77,7 @@ async function emailPagamentoConfirmado(order){
     order,
     content:`${itemsHtml(order)}<p style="margin-top:18px"><b>Status:</b> pagamento aprovado.</p>`
   });
-  return sendEmail({ to:order.cliente?.email, subject:`Pagamento confirmado — pedido ${order.id}`, html });
+  return sendEmail({ to:order.cliente?.email, subject:`Pagamento confirmado — pedido ${order.id}`, html, notifyStore:true });
 }
 
 async function emailNotaFiscal(order){
